@@ -39,7 +39,10 @@ snn-hw-lab/
 │   └── run.sh          ← Linux（iverilog + GTKWave）备用
 ├── 02_lif_leak/        带泄漏的膜电位累加器 —— LIF 神经元的心脏
 ├── 03_handshake/       valid/ready 握手寄存器 —— AER 事件派发
-├── docs/NOTES.md       调试笔记：8 个踩过的坑 + 6 个自检问答
+├── docs/
+│   ├── NOTES.md        调试笔记：8 个踩过的坑 + 6 个自检问答
+│   └── img/            波形图（由 tools/plot_waveform.py 从 dump.vcd 渲染）
+├── tools/plot_waveform.py   VCD → 时序图（numpy + matplotlib + vcdvcd）
 └── README.md
 ```
 
@@ -119,6 +122,36 @@ assign s_ready = (~m_valid_r) | m_ready;   // 组合：空着，或下游正在�
 这个结构在工业界叫 **register slice**（AXI 里的"前向寄存、后向直通"）。
 若 `ready` 链太长（跨多级模块），才会升级成深度 2 的 skid buffer，代价是面积和一拍延迟。
 
+### 4.4 波形：握手在时间轴上长什么样
+
+> 下面两张图**不是截图**：`tools/plot_waveform.py` 读取 XSim 导出的 `dump.vcd`，用 matplotlib 渲染。
+> 每次跑完 `run_xsim.bat` 都能重新生成，所以图和代码永远同步、不会过期。
+
+**定向测试段（0–205 ns）**
+
+![handshake, directed tests](docs/img/hs-reg-directed.png)
+
+- **50–100 ns**：下游 `m_ready = 0`。`m_valid` 保持 1、`m_data` 保持 `A5`，`s_ready` 掉到 0
+  —— 数据一位都没动，上游被回头看住（背压）。
+- **≈135 ns**：绿色虚线与蓝色虚线重合的那一拍——**同一个上升沿**里，旧数 `11` 被下游取走、
+  新数 `22` 同时装进来。这就是"一拍顶一拍"，吞吐不掉。
+- 复位后 `m_data` 显示 `xx` 是正常的：**数据寄存器故意不复位**（见 4.3）。
+
+**随机激励段（1000–1300 ns）**
+
+![handshake, random stimulus](docs/img/hs-reg-random.png)
+
+- 上游约 75% 概率给数据、下游约 50% 概率能收，两边节奏完全不对齐。
+- 对比 `s_data` 与 `m_data` 两行的取值序列：`C0 2F 5A 00 8F F6 59 AE 38 0C BC 17`
+  —— **一进一出、顺序完全一致**，不丢不重不乱序。
+- 整个 500 拍跑完：**211 收 = 211 出，0 失败**。
+
+复现（先跑一次仿真生成 `dump.vcd`，再用 venv 里的 Python）：
+
+```bash
+python tools/plot_waveform.py 03_handshake/dump.vcd docs/img/hs-reg-directed.png 0 205
+```
+
 ---
 
 ## 5. 这些数字能说明什么、不能说明什么
@@ -149,4 +182,5 @@ assign s_ready = (~m_valid_r) | m_ready;   // 组合：空着，或下游正在�
 | 仿真 | Vivado XSim 2019.1（`xvlog` / `xelab` / `xsim`），自检测试平台打印 PASS / FAIL |
 | 综合 | Vivado 2019.1 batch 模式，`xc7a35tcsg324-1`，输出 `util.rpt` |
 | 备用链路 | `run.sh`：iverilog + GTKWave（Linux / WSL） |
+| 波形工具 | Python 3.12 + numpy / matplotlib / vcdvcd（`tools/plot_waveform.py`） |
 | 语言 | Verilog-2005，纯可综合子集（无 `initial`、无延时、无 `$display` 在 RTL 里） |
