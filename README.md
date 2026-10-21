@@ -124,8 +124,8 @@ assign s_ready = (~m_valid_r) | m_ready;   // 组合：空着，或下游正在�
 
 ### 4.4 波形：握手在时间轴上长什么样
 
-> 下面两张图**不是截图**：`tools/plot_waveform.py` 读取 XSim 导出的 `dump.vcd`，用 matplotlib 渲染。
-> 每次跑完 `run_xsim.bat` 都能重新生成，所以图和代码永远同步、不会过期。
+> 本节所有波形图**都不是截图**：`tools/plot_waveform.py` 读取 XSim 导出的 `dump.vcd`，
+> 用 matplotlib 渲染。每次跑完 `run_xsim.bat` 都能重新生成，图和代码永远同步、不会过期。
 
 **定向测试段（0–205 ns）**
 
@@ -149,7 +149,49 @@ assign s_ready = (~m_valid_r) | m_ready;   // 组合：空着，或下游正在�
 复现（先跑一次仿真生成 `dump.vcd`，再用 venv 里的 Python）：
 
 ```bash
-python tools/plot_waveform.py 03_handshake/dump.vcd docs/img/hs-reg-directed.png 0 205
+python tools/plot_waveform.py 03_handshake/dump.vcd docs/img/hs-reg-directed.png hs 0 205
+```
+
+### 4.5 波形：FIFO 的满、空、以及"同时读写"
+
+**填 → 排空 → 再填满（40–660 ns）**
+
+![fifo overview](docs/img/fifo-overview.png)
+
+- `count` 从 0 累到 5，再被读空回 0（`empty` 拉高），然后重新填到 16（`full` 拉高）。
+- `dout` 是**组合读出**：只要 `count > 0`，队首数据就已经挂在端口上，不需要先给 `rd_en`
+  （所以 `dout` 在 55 ns 就变成 `0A`，而第一次读发生在 145 ns）。
+- `full = 1` 期间 `wr_en` 照样在打脉冲，但**被忽略**：`din = EE` 永远进不去，
+  `count` 卡在 16，直到 645 ns 有一次读腾出位置。
+- `empty = 1` 之后 `dout` 保持最后一个读出的值（`0E`）——规格要求如此，不是残留。
+
+**同时读写（2930–3160 ns）**
+
+![fifo simultaneous](docs/img/fifo-simultaneous.png)
+
+- 每一拍 `wr_en` 与 `rd_en` 同时为 1，而且既不满也不空：`count` **停在 4 纹丝不动**。
+- 这就是踩坑日志第 2 条：写成两个并列 `if` 时，后一条非阻塞赋值会**覆盖**前一条，
+  `count` 会错误地 −1。正确写法是 `case ({do_wr, do_rd})` 一次列清四种情况。
+
+### 4.6 波形：LIF 的"事件驱动"长什么样
+
+![lif update](docs/img/lif-update.png)
+
+- **120–215 ns**：`i_in` 在 `+999` / `−999` 之间来回跳，但 `en = 0` → `v_out` **一动不动**。
+  这不是仿真没刷新，而是那 16 个触发器整拍没有使能、一个都不翻转——事件驱动省电的物理来源。
+- **`en = 1` 的拍**：执行 `v_out <= v_out - (v_out >>> 4) + i_in`。
+  从 224 开始、`i_in = 0` 时依次 224 → 210 → 197 → 185 → …，每步正好 ×15/16，
+  这就是 `beta = 1 - 2^-SHIFT` 在波形上的样子。
+- 负数的算术右移由测试平台的"阶段 7"专门覆盖（重复 10 次），这里不重复展示。
+
+五张图的完整重现命令（每个模块先跑一次 `run_xsim.bat` 生成 `dump.vcd`）：
+
+```bash
+python tools/plot_waveform.py 03_handshake/dump.vcd docs/img/hs-reg-directed.png   hs   0    205
+python tools/plot_waveform.py 03_handshake/dump.vcd docs/img/hs-reg-random.png     hs   1000 1300
+python tools/plot_waveform.py 01_fifo/dump.vcd      docs/img/fifo-overview.png    fifo 40   660
+python tools/plot_waveform.py 01_fifo/dump.vcd      docs/img/fifo-simultaneous.png fifo 2930 3160
+python tools/plot_waveform.py 02_lif_leak/dump.vcd  docs/img/lif-update.png       lif  0    400
 ```
 
 ---
