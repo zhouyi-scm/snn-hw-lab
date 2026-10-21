@@ -1,0 +1,9 @@
+# 统一换行：仓库里一律 LF，只有 Windows 批处理强制 CRLF
+# （.bat 用 LF 会被 cmd 按字节切错行；.sh 用 CRLF 会让 bash 报 $'\r' 错误）
+* text=auto eol=lf
+
+*.bat  text eol=crlf
+*.sh   text eol=lf
+*.v    text eol=lf
+*.tcl  text eol=lf
+*.md   text eol=lf

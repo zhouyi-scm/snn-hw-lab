@@ -1,0 +1,152 @@
+# snn-hw-lab · 事件驱动 SNN 加速器：前端 RTL 起步
+
+> 三个可综合的小模块，是最终项目里真实要用的三块积木：**事件队列（FIFO）**、
+> **LIF 神经元（泄漏累加）**、**AER 事件派发（valid/ready 握手）**。
+> 目标不是"学语法"，而是能独立写出可综合的时序逻辑，并能在综合报告里把
+> 手写的每一行代码对应到真实硬件单元（FDCE / FDRE / LUT / RAM32M）。
+
+**English abstract.** Three synthesizable RTL building blocks for an event-driven
+spiking neural network accelerator: a synchronous FIFO (event queue), a leaky
+membrane-potential accumulator (LIF neuron core), and a valid/ready register
+slice (AER event dispatch). Each block ships with a self-checking testbench
+that prints `PASS` / `FAIL`; resource numbers were measured with Vivado 2019.1
+synthesis on `xc7a35tcsg324-1`.
+
+---
+
+## 1. 结果一览
+
+| # | 模块 | 功能 | 自检测试 | Slice LUTs | Registers | BRAM | DSP |
+|---|---|---|---|---|---|---|---|
+| 01 | [`fifo`](01_fifo/fifo.v) | 同步 FIFO，8 bit × 16 深，组合读出（首字直通） | **114 项 / 0 失败** | 28（其中 8 为 LUTRAM） | 16 | 0 | 0 |
+| 02 | [`lif_leak`](02_lif_leak/lif_leak.v) | LIF 膜电位：泄漏 + 累加，16 bit 有符号，β = 15/16 | **92 项 / 0 失败** | 20 | 16 | 0 | 0 |
+| 03 | [`hs_reg`](03_handshake/hs_reg.v) | valid/ready 握手寄存器，深度 1，支持背压与"一拍顶一拍" | **229 项 / 0 失败**（收 211 = 出 211） | 3 | 9 | 0 | 0 |
+
+> 器件：`xc7a35tcsg324-1`（Artix-7 35T），可用资源 20800 LUT / 41600 FF / 50 BRAM / 90 DSP。
+> 数字来自**综合**（`synth_design`），不是布局布线后的最终值；见第 5 节。
+
+---
+
+## 2. 目录结构
+
+```
+snn-hw-lab/
+├── 01_fifo/            同步 FIFO —— 事件队列
+│   ├── fifo.v          ← 设计（唯一需要你写的文件）
+│   ├── tb_fifo.v       ← 自检测试平台（裁判，不要改）
+│   ├── run_xsim.bat    ← Windows + Vivado XSim：跑仿真，打印 PASS/FAIL
+│   ├── synth.bat/.tcl  ← 综合，生成 util.rpt（资源数字）
+│   └── run.sh          ← Linux（iverilog + GTKWave）备用
+├── 02_lif_leak/        带泄漏的膜电位累加器 —— LIF 神经元的心脏
+├── 03_handshake/       valid/ready 握手寄存器 —— AER 事件派发
+├── docs/NOTES.md       调试笔记：8 个踩过的坑 + 6 个自检问答
+└── README.md
+```
+
+---
+
+## 3. 怎么跑
+
+只需要 Vivado（2019.1 或更新版本），**不需要建工程、不用点鼠标**。
+每个练习目录里：
+
+```bat
+cd 01_fifo
+run_xsim.bat            :: xvlog -> xelab -> xsim，秒级出 PASS / FAIL
+run_xsim.bat gui        :: 打开波形窗口（在 Tcl 控制台敲 run -all）
+synth.bat               :: 综合，30~60 秒后生成 util.rpt
+```
+
+脚本里的 `VIVADO_HOME` 是唯一需要按自己环境修改的一行。
+在 Linux / WSL 下用 `bash run.sh`（需要 `iverilog` 和 `gtkwave`）。
+
+> ⚠️ 两个实测坑（`docs/NOTES.md` 第 7、8 条）：
+> ① `.bat` 里不能写中文（`chcp 65001` 下 cmd 会按错误字节位置切行）；
+> ② `if ... ( ... )` 块内不能出现半角括号（`)` 会被当成块的结束符）。
+
+---
+
+## 4. 三个设计要点
+
+### 4.1 FIFO：用 `case` 一次覆盖四种状态
+
+`count` 最容易写错。下面这种"两个并列 `if`"在**同时读写**时会算错：
+
+```verilog
+if (do_wr) count <= count + 1;   // 非阻塞赋值：后一条会覆盖前一条
+if (do_rd) count <= count - 1;   // 同时读写时 count 错误地减 1
+```
+
+正确写法是把两个使能拼成一个 2 位向量，用 `case` 一次列清：
+
+```verilog
+case ({do_wr, do_rd})
+    2'b10:   cnt <= cnt + 1'b1;
+    2'b01:   cnt <= cnt - 1'b1;
+    default: cnt <= cnt;
+endcase
+```
+
+综合结果印证了"小 FIFO 不用 BRAM"：16×8 的存储体被推断成 **RAM32M × 2**
+（分布式 RAM，占 8 个 LUT 当存储用），16 个触发器全部来自 `cnt`(8) + 两个指针(4+4)。
+
+### 4.2 LIF：`en = 0` 时整拍不翻转，这就是省电的物理来源
+
+```verilog
+v_out <= v_out - (v_out >>> SHIFT) + i_in;   // 只有 en = 1 才执行
+```
+
+- 泄漏写成 `v - (v >>> SHIFT)`，其中 β = 1 − 2^−SHIFT。**一次乘法被换成"移位 + 减法"**，
+  综合后 DSP 占用为 0——这是低功耗 AI 芯片里最典型的思路。
+- 必须用**算术右移 `>>>`**（保留符号位），`>>` 会让负数变成很大的正数。
+- `en = 0` 时寄存器不写，综合出来 16 个触发器全是 **FDCE**，CE 端被拉低 → 一个都不翻转。
+  事件驱动加速器的能效优势，在 RTL 层面就是这一行"不写"。
+
+### 4.3 握手寄存器：为什么 `ready` 可以组合、`valid` 必须寄存
+
+```verilog
+assign s_ready = (~m_valid_r) | m_ready;   // 组合：空着，或下游正在取走
+```
+
+- `ready` 是**反向**的许可信号，必须当拍直通。若打成寄存器，每笔传输多耗一拍，**吞吐砍半**。
+- `valid` 与数据同向前进，必须和 `m_data` 一起被寄存器切一拍；否则上游组合逻辑会穿过本模块
+  直捅下游，形成贯穿多级的长路径（时序崩）。
+- 数据寄存器**故意不复位**：`m_valid_r = 0` 已经表示"手里没货"，数据位复位没有意义。
+  综合报告印证了这一点：**1 × FDCE（`m_valid_r`，异步复位）+ 8 × FDRE（`m_data_r`，复位脚接 0）**。
+- 3 个 LUT 的完整拆解：`s_ready` 的或门（LUT2）、数据使能 `s_valid & s_ready` 的与门（LUT3）、
+  把低有效 `rst_n` 反相成 FDCE 的 `CLR`（LUT1）。**全部组合逻辑 = 一个或门 + 一个与门**。
+
+这个结构在工业界叫 **register slice**（AXI 里的"前向寄存、后向直通"）。
+若 `ready` 链太长（跨多级模块），才会升级成深度 2 的 skid buffer，代价是面积和一拍延迟。
+
+---
+
+## 5. 这些数字能说明什么、不能说明什么
+
+| 能说 | 不能说 |
+|---|---|
+| 综合后 LUT / FF / BRAM / DSP 占用 | ~~最高频率 fmax~~（需要 implementation，本项目只做到 synthesis） |
+| 每个功能单元的硬件代价（如"泄漏+累加 = 约 20 LUT"） | ~~实测功耗~~（没有板子、没有电流表） |
+| 设计意图与综合结果的对应关系（FDCE / FDRE / RAM32M） | ~~与其他加速器的公平性能对比~~（尚无端到端负载） |
+
+写进展报告 / 简历时请按这个边界表述，避免"编数字"。
+
+---
+
+## 6. 路线图
+
+- [x] **阶段一**：三个基础 RTL 模块（FIFO / LIF / 握手）+ 综合资源数字 ← *当前进度*
+- [ ] **阶段二**：Python 定点黄金模型（numpy），与 RTL 对拍
+- [ ] **阶段三**：LIF 阵列 + 事件队列组网，AER 派发
+- [ ] **阶段四**：N-MNIST 事件流端到端仿真，统计有效计算次数与能效
+
+---
+
+## 7. 环境
+
+| 项目 | 版本 / 说明 |
+|---|---|
+| 仿真 | Vivado XSim 2019.1（`xvlog` / `xelab` / `xsim`），自检测试平台打印 PASS / FAIL |
+| 综合 | Vivado 2019.1 batch 模式，`xc7a35tcsg324-1`，输出 `util.rpt` |
+| 备用链路 | `run.sh`：iverilog + GTKWave（Linux / WSL） |
+| 语言 | Verilog-2005，纯可综合子集（无 `initial`、无延时、无 `$display` 在 RTL 里） |

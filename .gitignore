@@ -1,0 +1,26 @@
+# ---- Vivado / XSim build artifacts ----
+*.jou
+*.log
+*.pb
+*.wdb
+*.vcd
+*.str
+*.dcp
+*.bit
+*.ltx
+*.rpt
+*.backup.*
+
+# simulation / synthesis directories
+.Xil/
+.xil/
+xsim.dir/
+sim_*/
+*.sim/
+
+# ---- OS / editor ----
+Thumbs.db
+desktop.ini
+.DS_Store
+.vscode/
+*.swp
